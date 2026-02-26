@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>内部物流查询系统</title>
+
+<style>
+body{
+    margin:0;
+    font-family: "Segoe UI", Arial;
+    background: linear-gradient(135deg,#0f2027,#203a43,#2c5364);
+    color:white;
+}
+
+h1{
+    text-align:center;
+    padding:20px;
+    font-size:28px;
+    letter-spacing:2px;
+}
+
+.container{
+    width:95%;
+    margin:auto;
+    background:rgba(255,255,255,0.05);
+    padding:30px;
+    border-radius:15px;
+    box-shadow:0 0 30px rgba(0,0,0,0.4);
+}
+
+button{
+    background:#00c6ff;
+    border:none;
+    padding:10px 20px;
+    border-radius:8px;
+    cursor:pointer;
+    font-weight:bold;
+    color:white;
+}
+
+button:hover{
+    background:#0072ff;
+}
+
+.stats{
+    display:flex;
+    justify-content:space-between;
+    margin:30px 0;
+}
+
+.stat-box{
+    flex:1;
+    margin:10px;
+    padding:20px;
+    background:rgba(255,255,255,0.08);
+    border-radius:12px;
+    text-align:center;
+    font-size:20px;
+}
+
+.stat-box span{
+    display:block;
+    font-size:30px;
+    font-weight:bold;
+    margin-top:10px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:20px;
+}
+
+th,td{
+    padding:12px;
+    text-align:center;
+}
+
+th{
+    background:rgba(255,255,255,0.1);
+}
+
+tr:nth-child(even){
+    background:rgba(255,255,255,0.05);
+}
+
+tr:hover{
+    background:rgba(0,255,255,0.1);
+}
+
+.summary-cell{
+    color:#00f5ff;
+    font-weight:bold;
+    text-shadow:0 0 10px rgba(0,255,255,0.8);
+}
+
+.delivered{
+    color:#00ff99;
+    font-weight:bold;
+}
+
+.not-delivered{
+    color:#ff4d4d;
+    font-weight:bold;
+}
+
+.download-btn{
+    margin-top:20px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🚀 内部物流查询系统</h1>
+
+<div class="container">
+
+    <!-- 单号查询 -->
+    <form action="/lookup" method="post" style="margin-bottom:20px;">
+        <input type="text" name="order_id" placeholder="输入运单号查询" style="padding:8px;width:60%;" required>
+        <button type="submit">查询</button>
+    </form>
+
+    <form id="uploadForm" enctype="multipart/form-data">
+        <input type="file" id="fileInput" name="file" required>
+        <label style="margin-left:10px"><input type="checkbox" id="feishu"> 飞书同步</label>
+        <button type="submit">开始查询</button>
+    </form>
+
+    <div id="progressContainer" style="display:none;margin-top:16px;">
+        <div id="progressText">0/0</div>
+        <progress id="progressBar" value="0" max="100" style="width:100%;height:18px;"></progress>
+    </div>
+
+    <script>
+    const form = document.getElementById('uploadForm');
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const f = document.getElementById('fileInput').files[0];
+        if (!f) return alert('请选择文件');
+        const fd = new FormData();
+        fd.append('file', f);
+        const res = await fetch('/upload', {method:'POST', body: fd});
+        const j = await res.json();
+        const filepath = j.filename || j.file || j.path;
+        if (!filepath) return alert('上传失败');
+
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+        ws.addEventListener('open', () => {
+            ws.send(JSON.stringify({file: filepath, feishu: document.getElementById('feishu').checked}));
+            document.getElementById('progressContainer').style.display = 'block';
+        });
+        ws.addEventListener('message', (ev) => {
+            const data = JSON.parse(ev.data);
+            if (data.error) {
+                alert(data.error);
+                ws.close();
+                return;
+            }
+            if (data.feishu_status) {
+                console.log('Feishu:', data.feishu_status);
+            }
+            if (data.complete) {
+                document.getElementById('progressText').innerText = '完成：' + data.result;
+                document.getElementById('progressBar').value = 100;
+                ws.close();
+                // 页面刷新以显示结果（可选）
+                setTimeout(()=>location.reload(), 1200);
+                return;
+            }
+            const done = data.done || 0;
+            const total = data.total || 0;
+            document.getElementById('progressText').innerText = `${done}/${total} 最近:${data.order_id} 状态:${data.status}`;
+            if (total) {
+                document.getElementById('progressBar').value = (done/total)*100;
+                document.getElementById('progressBar').max = 100;
+            }
+        });
+    });
+    </script>
+
+    {% if results %}
+
+    <div class="stats">
+        <div class="stat-box">
+            总单量
+            <span>{{ total }}</span>
+        </div>
+        <div class="stat-box">
+            已签收
+            <span>{{ delivered_count }}</span>
+        </div>
+        <div class="stat-box">
+            签收率
+            <span>{{ rate }}%</span>
+        </div>
+    </div>
+
+    <a href="/download">
+        <button class="download-btn">下载结果 Excel</button>
+    </a>
+
+    <table>
+        <thead>
+            <tr>
+                <th>订单号</th>
+                <th>最新状态</th>
+                <th>最新时间</th>
+                <th>是否签收</th>
+                <th>物流节点摘要</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in results %}
+            <tr>
+                <td>{{ row.order_id }}</td>
+                <td>{{ row.latest_status }}</td>
+                <td>{{ row.latest_time }}</td>
+                <td class="{% if row.delivered == '是' %}delivered{% else %}not-delivered{% endif %}">
+                    {{ row.delivered }}
+                </td>
+                <td class="summary-cell">
+                    {{ row.smart_summary }}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {% endif %}
+
+</div>
+
+</body>
+</html>
