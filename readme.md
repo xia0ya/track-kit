@@ -57,3 +57,7 @@ python excel_scheduler.py status
 
 
 t-g1042qggQ55DTFCYWASG2IZHGOXNM3WTU4CHZ4EU# track-kit
+
+
+# 飞书传入并并发写入
+ feishu_query_v3.py，这是核心代码
