@@ -46,7 +46,7 @@ TRACK_HEADERS_YHWL = {
 # ========== 物流查询配置 - 接口 2 (HTML 解析) ==========
 TRACK_URL_HTML = "http://124.222.204.239:8082/trackIndex.htm"
 TRACK_HEADERS_HTML = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     "Referer": TRACK_URL_HTML,
 }
 
@@ -151,7 +151,7 @@ def query_tracking_yhwl(order_id, retry=2):
             pass
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(1)
     return None
 
 def parse_tracking_yhwl(html):
@@ -201,45 +201,71 @@ def extract_logistics_summary_yhwl(tracking_list):
 # 物流查询 - 接口 2 (HTML 解析)
 # ============================
 
-def query_tracking_html(order_id, retry=2):
-    """HTML 接口查询"""
+def query_tracking_html(ordesr_id, retry=3):
+    """HTML 接口查询；如果解析不到轨迹，s会自动重试几次，缓解反爬/偶发空页"""
     session = requests.Session()
     for attempt in range(retry):
         try:
+            # 先 GET 一次页面，模拟正常浏览器访问
+            session.get(TRACK_URL_HTML, timeout=10)
             response = session.post(
                 TRACK_URL_HTML,
-                data={"id": order_id},
+                data={"documentCode": order_id},
                 headers=TRACK_HEADERS_HTML,
                 timeout=REQUEST_TIMEOUT
             )
             if response.status_code == 200:
-                return response.text
-        except requests.Timeout:
-            pass
-        except Exception:
-            pass
-        time.sleep(0.5)
+                response.encoding = response.apparent_encoding or "utf-8"
+                parsed = parse_tracking_html(response.text)
+                safe_print(f"  [HTML DEBUG] {order_id} 尝试{attempt+1}/{retry}: 解析到{len(parsed)}条记录")
+                # 真正拿到轨迹再返回；空结果视为失败，继续重试
+                if parsed:
+                    return response.text
+        except Exception as e:
+            safe_print(f"  [HTML ERROR] {order_id} 尝试{attempt+1}/{retry}: {e}")
+        # 简单退避，避免请求过于密集
+        time.sleep(0.8 * (attempt + 1))
     return None
 
+
 def parse_tracking_html(html: str):
-    """解析 HTML 物流追踪页面，返回统一格式"""
+    """解析 HTML 物流追踪页面，返回统一格式：[{time, status}, ...]"""
     results = []
     try:
         soup = BeautifulSoup(html, "html.parser")
-        
-        # 追踪记录：table > tr > td (3 列)
-        for table in soup.find_all("table"):
-            for tr in table.find_all("tr"):
-                cells = tr.find_all("td")
-                if len(cells) == 3:
-                    date, loc, detail = [c.get_text(strip=True) for c in cells]
-                    if date and detail:
-                        # 统一格式：time, status
-                        results.append({"time": date, "status": f"{loc} {detail}" if loc else detail})
+
+        # 优先从详细轨迹区域 div.difmeam 中的 table 提取
+        dif = soup.find("div", class_="difmeam")
+        if dif:
+            table = dif.find("table")
+        else:
+            table = None
+            # 兜底：页面中所有 table 里，找出包含 3 列 td 的行，视为轨迹表
+            for t in soup.find_all("table"):
+                if any(len(tr.find_all("td")) == 3 for tr in t.find_all("tr")):
+                    table = t
+                    break
+
+        if not table:
+            return results
+
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) != 3:
+                continue
+            date = cells[0].get_text(strip=True)
+            loc = cells[1].get_text(strip=True)
+            detail = cells[2].get_text(strip=True)
+            if not date or not detail:
+                continue
+
+            status = f"{loc} {detail}" if loc else detail
+            results.append({"time": date, "status": status})
     except Exception:
         pass
-    
+
     return results
+
 
 def extract_logistics_summary_html(tracking_list):
     """提取物流摘要（HTML 接口）"""
@@ -293,11 +319,17 @@ def process_single(item, source="auto"):
         html = query_tracking_html(order_id)
         if html:
             tracking_list = parse_tracking_html(html)
-    else:  # auto - 先试 yhwl，失败后试 html
+    else:  # auto - 先试 yhwl，失败后试 html（包括 yhwl 返回空轨迹时）
         raw = query_tracking_yhwl(order_id)
         if raw and raw.get("code") == 1:
             tracking_list = parse_tracking_yhwl(raw.get("data", ""))
             source_used = "yhwl"
+            # 如果 yhwl 返回的内容解析不到任何轨迹，则自动降级到 HTML 接口
+            if not tracking_list:
+                html = query_tracking_html(order_id)
+                if html:
+                    tracking_list = parse_tracking_html(html)
+                    source_used = "html"
         else:
             html = query_tracking_html(order_id)
             if html:
